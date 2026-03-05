@@ -1,0 +1,21 @@
+# secrets
+.env
+
+# environments
+.venv/
+__pycache__/
+*.pyc
+
+# raw clinic docs + quarantine
+clinic_docs/
+_quarantine/
+
+# generated csv (can contain PII)
+file_index.csv
+file_index_with_dates.csv
+*.csv
+
+# OS junk
+desktop.ini
+.DS_Store
+.idea/
