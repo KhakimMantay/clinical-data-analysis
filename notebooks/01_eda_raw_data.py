@@ -66,9 +66,9 @@ def _(mo):
 
     - `visit_type_final = 'unknown'`: 24 rows were identified. Most of the clinical features in these entries are missing.
 
-    - all values at 'visit_type_final' same as in 'visit_type_inferred'
+    - All values in `visit_type_final` are identical to those in `visit_type_inferred`.
 
-    - most of the rows with `visit_type = 'unknown'` were different in 'visit_type_inferred', 7.3% of whole data.
+    - Most of the rows with original `visit_type = 'unknown'` were reassigned in `visit_type_inferred` (~7.3% of the dataset).
 
     - `pregnancies_raw = 20` was verified against source data and found to be valid
       (sum of births, abortions, and miscarriages).
@@ -84,19 +84,36 @@ def _(mo):
     - Rows with original `visit_type = 'unknown'` show a high percentage of missing
       values across clinical features.
 
-    ### Conclusions
+    - Multiple records can correspond to a single real-world visit, as different document types
+      (e.g., ultrasound, consultation) may be created for the same patient on the same date.
 
-    - Rows where `visit_type_final = 'unknown'` contain insufficient information and
-      are not suitable for analysis.
+    - Some visit dates were inferred as the first day of the month (`YYYY-MM-01`) due to missing
+      day information (`date_quality = 'month_only'`), which introduces artificial spikes in daily counts.
 
-    - Not all extreme values are errors; some represent valid but rare cases.
+    - High-frequency dates (e.g., 30+ records per day) were found to consist of both valid extracted
+      dates (`exact_anchor`) and imputed dates (`month_only`), indicating mixed data quality.
 
-    - Some rows contain internally inconsistent data, indicating data quality issues.
+    ---
 
-    - A significant portion of low-quality data originally labeled as `visit_type = 'unknown'`
-      was reassigned to other categories (e.g., `consult`), which may bias visit-type analysis.
+    ### Conclusions and required data cleaning steps
 
-    - Domain knowledge and manual validation are essential for reliable preprocessing.
+    The exploratory data analysis revealed several data quality issues that must be addressed before further analysis:
+
+    - Rows where `visit_type_final = 'unknown'` contain insufficient information and should be removed, as they provide little analytical value and contain a high proportion of missing features.
+
+    - Some clinical variables contain clear extraction errors (e.g., unrealistic values such as `births_raw = 2016` or `menarche_age_raw = 1`). These values must be cleaned, corrected, or excluded to prevent distortion of statistical analysis.
+
+    - Internal inconsistencies were identified (e.g., `pregnancies_raw` not matching the sum of related variables). These rows should be validated or excluded depending on the analysis requirements.
+
+    - Visit dates with `date_quality = 'month_only'` are artificially imputed and lead to biased temporal distributions (e.g., spikes on the first day of each month). These rows should be excluded or handled separately in time-based analyses.
+
+    - The dataset is structured at the file level rather than the visit level, meaning that multiple rows may correspond to a single real-world visit. Therefore, aggregation by `(patient_id, visit_date)` is required to correctly represent visits.
+
+    - The presence of fallback-based date extraction (e.g., `fallback_single`, `fallback_scored`) indicates that the date extraction logic may be incomplete, particularly for certain document types (e.g., ultrasound). Further refinement of the extraction pipeline is recommended.
+
+    - High-frequency dates must be interpreted with caution, as they may reflect a mixture of true visit dates and imputed or low-confidence values.
+
+    Overall, additional preprocessing is required to ensure data reliability before performing statistical analysis or building models.
     """)
     return
 
@@ -145,6 +162,17 @@ def _(compare_inferred_original, df):
 
 @app.cell
 def _(df):
+    mask_suspicious = (df['visit_type'] == 'unknown') & (df['visit_type_final'] != 'unknown')
+
+    key_cols = ['visit_date', 'birth_year', 'complaints_raw', 
+                'diagnosis_raw', 'birads_raw']
+
+    (df[mask_suspicious][key_cols].isnull().mean() * 100).round(1)
+    return
+
+
+@app.cell
+def _(df):
     minimal_birth_num = df.loc[df['births_raw'].idxmax()] #probably mistake in the document, we dont know births count
     minimal_birth_num
     return
@@ -170,6 +198,63 @@ def _(df, pd):
     misscariages_numeric = pd.to_numeric(df['miscarriages_raw'], errors="coerce")
 
     wrong_pregnancy_number_rows = df[(mask) & (df['pregnancies_raw'] != df['abortions_raw'] + misscariages_numeric + df['births_raw'])]
+    wrong_pregnancy_number_rows
+    return
+
+
+@app.cell
+def _(df):
+    df[['date_rule_used', 'date_quality']].value_counts()
+    return
+
+
+@app.cell
+def _(df):
+    df[df['date_rule_used'] == 'fallback_single'].head(10)
+    return
+
+
+@app.cell
+def _(df):
+    ultrasound_date_rule = (df[df['visit_type_inferred'] == 'ultrasound']['date_rule_used'] == 'fallback_single')
+    ultrasound_date_rule.value_counts()
+    return
+
+
+@app.cell
+def _(df):
+    df[(df['visit_type_final'] == 'ultrasound') & (df['date_rule_used'] != 'fallback_single')]
+    return
+
+
+@app.cell
+def _(df):
+    df[df['date_rule_used'] == 'none'][['visit_date', 'date_quality']]
+    return
+
+
+@app.cell
+def _(df):
+    df['visit_date'].value_counts() # too many visits on some dates, should check
+    return
+
+
+@app.cell
+def _(df):
+    df['visit_date'].value_counts().head()
+    return
+
+
+@app.cell
+def _(df):
+    visits = df.drop_duplicates(subset=['patient_id', 'visit_date'])
+    visits['visit_date'].value_counts().head()
+    return
+
+
+@app.cell
+def _(df):
+    df[df['visit_date'] == '2020-03-01']['date_quality'].value_counts()
     return
 
 
