@@ -43,8 +43,9 @@ NON_LETTER_RE = re.compile(r"[^a-zа-яё-]+", re.IGNORECASE)
 
 FILENAME_STOPWORDS = (
     "перв", "первич", "повт", "повтор", "узи", "онк", "шабл", "шаблон",
-    "прием", "приём", "протокол", "копия", "копия", "new", "новый",
+    "прием", "приём", "протокол", "копия", "new", "новый",
 )
+
 
 def normalize_name(raw_fio: str) -> str:
     s = (raw_fio or "").strip().lower().replace("ё", "е")
@@ -80,11 +81,9 @@ def normalize_dob(raw_dob: str) -> str:
 
 
 def dob_to_birth_year(raw_dob: str) -> str:
-    """Extract just the birth year from raw DOB string. Returns '' if can't parse."""
     iso = normalize_dob(raw_dob)
     if iso and len(iso) >= 4:
         year = iso[:4]
-        # sanity check: patients born between 1920 and 2010
         try:
             y = int(year)
             if 1920 <= y <= 2010:
@@ -184,7 +183,7 @@ def make_file_id(path: Path) -> str:
 
 
 # ─────────────────────────────────────────────
-# Date extraction (original, unchanged)
+# Date extraction
 # ─────────────────────────────────────────────
 DATE_DOT_YYYY_RE = re.compile(r"\b(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})\b")
 DATE_SLASH_YYYY_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
@@ -202,13 +201,23 @@ RU_MONTH_RE = re.compile(
 
 BIRTH_HINTS = ("г.р", "г.р.", "год рождения", "дата рождения", "родил", "родилась", "birth")
 HISTORY_HINTS = (
-    "анамнез", "ранее", "предыду", "в прошлом", "прошл", "контроль", "повторить",
-    "предыдущ", "сравнение", "динамик", "история", "наблюдение"
+    "анамнез", "ранее", "предыду", "в прошлом", "прошл", "контроль",
+    "контрольный", "повторить", "предыдущ", "сравнение", "динамик",
+    "история", "наблюдение", "дата следующего визита", "следующего визита",
 )
+
 CONSULT_ANCHORS = (
-    "дата первичного осмотра", "дата осмотра", "дата приема",
-    "дата приёма", "дата визита", "осмотр", "прием", "приём", "консультац",
+    "дата первичного осмотра",
+    "дата заключительного осмотра",
+    "дата осмотра",
+    "дата приема",
+    "дата приёма",
+    "дата визита",
+    "прием врача-маммолога",
+    "приём врача-маммолога",
+    "консультац",
 )
+
 ULTRASOUND_ANCHORS = (
     "узи", "ультразвук", "ультразвуков", "исследовани", "протокол", "заключение",
 )
@@ -220,9 +229,6 @@ CONSULT_PRIORITY_PATTERNS = [
     ("visit_date", re.compile(
         r"(дата\s*(приема|приёма|визита)[^0-9]{0,80})"
         r"(\d{1,2}[.\-/]\d{1,2}[.\-/](\d{2}|\d{4}))", re.IGNORECASE), 3),
-    ("exam_from", re.compile(
-        r"(осмотр[^0-9]{0,80}от[^0-9]{0,20})"
-        r"(\d{1,2}[.\-/]\d{1,2}[.\-/](\d{2}|\d{4}))", re.IGNORECASE), 2),
     ("priem_from", re.compile(
         r"((прием|приём)[^0-9]{0,120}от[^0-9]{0,20})"
         r"(\d{1,2}[.\-/]\d{1,2}[.\-/](\d{2}|\d{4}))", re.IGNORECASE), 3),
@@ -242,6 +248,30 @@ ULTRASOUND_PRIORITY_PATTERNS = [
         r"(узи[^0-9]{0,160})(дата[^0-9]{0,40})"
         r"(\d{1,2}[.\-/]\d{1,2}[.\-/](\d{2}|\d{4}))", re.IGNORECASE), 3),
 ]
+
+SECOND_DOC_HEADER_RE = re.compile(
+    r"(?:^|\n)\s*"
+    r"(?:медицинское\s+заключение|"
+    r"осмотр\s+врача\s+маммолога|"
+    r"при[её]м\s+врача-?маммолога|"
+    r"протокол(?:\s+узи)?)\b",
+    re.IGNORECASE,
+)
+
+PATIENT_NAME_BLOCK_RE = re.compile(
+    r"(?:ФИО\s*пациента|"
+    r"Т\.\s*А\.\s*Ө\.\s*\(Ф\.\s*И\.\s*О\.\)|"
+    r"Пациент(?:ка)?)\s*[:\-]\s*\[?\s*([^\]\n]+?)\s*\]?(?:\n|$)",
+    re.IGNORECASE,
+)
+
+PATIENT_DOB_BLOCK_RE = re.compile(
+    r"(?:Дата\s*рождения|"
+    r"Число\s*,\s*месяц\s*,\s*год\s*рождения|"
+    r"Туған\s+күні\s*\(Дата\s+рождения\))\s*[:\-]?\s*\[?\s*"
+    r"([0-3]?\d[.\-/][01]?\d[.\-/]\d{4})",
+    re.IGNORECASE,
+)
 
 
 def _convert_2digit_year(yy: int) -> int:
@@ -289,6 +319,78 @@ def docx_text(path: Path) -> str:
     return "\n".join(parts)
 
 
+def trim_to_main_patient_block(text: str, path: Path) -> str:
+    """
+    Cut off a foreign trailing block if the same .docx contains
+    a second document or another patient.
+    """
+    if not text:
+        return text
+
+    fio_raw, dob_raw, _ = extract_fio_and_dob(text, path)
+    main_fio = normalize_name(fio_raw)
+    main_dob = normalize_dob(dob_raw)
+
+    cut_positions: list[int] = []
+
+    def add_cut(pos: int) -> None:
+        if pos >= 600:
+            cut_positions.append(pos)
+
+    # Different patient name later in the file
+    for m in PATIENT_NAME_BLOCK_RE.finditer(text):
+        candidate_fio = normalize_name(m.group(1))
+        if main_fio and candidate_fio and candidate_fio != main_fio:
+            add_cut(m.start())
+
+    # Different DOB later in the file
+    for m in PATIENT_DOB_BLOCK_RE.finditer(text):
+        candidate_dob = normalize_dob(m.group(1))
+        if main_dob and candidate_dob and candidate_dob != main_dob:
+            add_cut(m.start())
+
+    # Suspicious second document header later in the file
+    for m in SECOND_DOC_HEADER_RE.finditer(text):
+        if m.start() < 600:
+            continue
+
+        tail = text[m.start(): m.start() + 1400]
+
+        foreign_name_found = False
+        for nm in PATIENT_NAME_BLOCK_RE.finditer(tail):
+            candidate_fio = normalize_name(nm.group(1))
+            if main_fio and candidate_fio and candidate_fio != main_fio:
+                foreign_name_found = True
+                break
+
+        foreign_dob_found = False
+        for dm in PATIENT_DOB_BLOCK_RE.finditer(tail):
+            candidate_dob = normalize_dob(dm.group(1))
+            if main_dob and candidate_dob and candidate_dob != main_dob:
+                foreign_dob_found = True
+                break
+
+        has_doc_meta = re.search(
+            r"(?:^|\n)\s*(?:Дата|Время|№\s*истории\s*болезни)\s*[:\-]",
+            tail,
+            re.IGNORECASE,
+        )
+
+        if foreign_name_found or foreign_dob_found or has_doc_meta:
+            add_cut(m.start())
+
+    if not cut_positions:
+        return text
+
+    cut_at = min(cut_positions)
+    trimmed = text[:cut_at].rstrip()
+
+    if len(trimmed) < 300:
+        return text
+
+    return trimmed
+
+
 def has_any_hint_near(text_lower: str, pos: int, hints: tuple[str, ...], window: int) -> bool:
     start = max(0, pos - window)
     end = min(len(text_lower), pos + window)
@@ -316,6 +418,7 @@ def collect_date_candidates(text: str) -> list[dict]:
             if has_any_hint_near(t, m.start(), BIRTH_HINTS, window=55):
                 continue
             out.append({"pos": m.start(), "dt": dt, "raw_kind": kind})
+
     for m in RU_MONTH_RE.finditer(t):
         day = int(m.group(1))
         month_name = m.group(2).lower()
@@ -330,14 +433,17 @@ def collect_date_candidates(text: str) -> list[dict]:
         if has_any_hint_near(t, m.start(), BIRTH_HINTS, window=65):
             continue
         out.append({"pos": m.start(), "dt": dt, "raw_kind": "ru_month"})
+
     out.sort(key=lambda x: x["pos"])
     return out
 
 
 def score_candidate(text_lower: str, candidate_pos: int, doc_kind: str) -> int:
     score = 0
+
     if has_any_hint_near(text_lower, candidate_pos, HISTORY_HINTS, window=70):
         score -= 40
+
     if doc_kind == "consult":
         if has_any_hint_near(text_lower, candidate_pos, CONSULT_ANCHORS, window=90):
             score += 80
@@ -354,10 +460,12 @@ def score_candidate(text_lower: str, candidate_pos: int, doc_kind: str) -> int:
             score += 60
         if has_any_hint_near(text_lower, candidate_pos, ("дата исследования", "дата проведения", "дата выполнения"), window=160):
             score += 35
+
     if candidate_pos < 400:
         score += 10
     if candidate_pos < 200:
         score += 5
+
     return score
 
 
@@ -387,18 +495,23 @@ def pick_from_priority_patterns(text: str, doc_kind: str) -> tuple[str | None, s
 
 def choose_main_visit_date(text: str, visit_type: str) -> tuple[str | None, int, str, str]:
     doc_kind = doc_kind_from_visit_type(visit_type)
+
     exact, rule = pick_from_priority_patterns(text, doc_kind)
     if exact:
         candidates = collect_date_candidates(text)
         return exact, len(candidates), rule, "exact_anchor"
+
     candidates = collect_date_candidates(text)
     if not candidates:
         return None, 0, "none", "none"
+
     if len(candidates) == 1:
         return candidates[0]["dt"].date().isoformat(), 1, "fallback_single", "fallback_single"
+
     t = text.lower()
     best = None
     best_score = None
+
     for c in candidates:
         sc = score_candidate(t, c["pos"], doc_kind)
         if best_score is None or sc > best_score:
@@ -406,6 +519,7 @@ def choose_main_visit_date(text: str, visit_type: str) -> tuple[str | None, int,
             best = c
         elif sc == best_score and best and c["pos"] < best["pos"]:
             best = c
+
     return best["dt"].date().isoformat(), len(candidates), "fallback_scored", "fallback_scored"
 
 
@@ -413,7 +527,7 @@ def infer_visit_type_for_unknown(original_vt: str, doc_kind: str, rule_used: str
     vt = (original_vt or "unknown").strip().lower()
     if vt != "unknown":
         return vt
-    if rule_used in {"primary_exam_date", "visit_date", "exam_from", "priem_from"}:
+    if rule_used in {"primary_exam_date", "visit_date", "priem_from"}:
         return "consult"
     if rule_used in {"uzi_from", "uzi_protocol_from", "study_date", "uzi_date_generic"}:
         return "ultrasound"
@@ -445,65 +559,26 @@ def approx_from_month_year(row: dict) -> str | None:
 
 
 # ─────────────────────────────────────────────
-# NEW: Clinical field extraction
+# Clinical field extraction
 # ─────────────────────────────────────────────
-
 def _first_line_after(text: str, anchors: tuple[str, ...], max_chars: int = 300) -> str:
-    """
-    Find first anchor keyword in text, return the raw text that follows it
-    (up to max_chars characters or the next newline-heavy section).
-    Everything is returned as-is — dirty, unprocessed. That is intentional.
-    """
     t_lower = text.lower()
     for anchor in anchors:
         pos = t_lower.find(anchor.lower())
         if pos == -1:
             continue
-        # move past the anchor itself
         start = pos + len(anchor)
-        # skip leading punctuation/spaces
         while start < len(text) and text[start] in " :\t-–—":
             start += 1
         chunk = text[start: start + max_chars]
-        # cut at double newline (new section starts)
         chunk = re.split(r"\n{2,}", chunk)[0]
         return chunk.strip()
     return ""
 
 
 def extract_clinical_fields(text: str) -> dict:
-    """
-    Extract raw clinical fields from document text.
-
-    All values are returned as raw strings — messy, inconsistent, sometimes
-    empty. This is intentional: the whole point is to give you real data
-    cleaning work in pandas.
-
-    Fields added to each row:
-      birth_year            – year of birth (4 digits or '')
-      menarche_age_raw      – e.g. '14', '13-14', 'не помнит'
-      pregnancies_raw       – e.g. '3', '', '-'
-      births_raw            – e.g. '1'
-      abortions_raw         – e.g. '2', 'нет'
-      miscarriages_raw      – e.g. '0', '-'
-      breastfed_raw         – e.g. 'до года', '6 мес', 'нет', ''
-      breastfed_complications_raw  – e.g. 'мастит', 'лактостаз правой мж', ''
-      complaints_raw        – free text of complaints (первые 400 символов)
-      diagnosis_raw         – free text of final diagnosis
-      icd10_code            – e.g. 'N60.1', 'N63', '' — only first code found
-      birads_raw            – e.g. 'BIRADS 1|2', 'BI-RADS 3', '2'
-      nodular_formation_raw – e.g. 'не пальпируется', 'пальпируется узел 1 см'
-      heredity_oncology_raw – raw heredity section text (oncology context)
-      past_diabetes_raw     – text around diabetes mention
-      past_thyroid_raw      – text around thyroid mention
-      ca153_raw             – e.g. '12.5', '-', ''
-      uzi_result_raw        – raw UZI conclusion text (первые 300 символов)
-    """
     fields: dict = {}
 
-    # ── birth_year ──────────────────────────────────────────────────────────
-    # DOB is already extracted for HMAC. We re-extract it here to get birth_year.
-    # We do NOT store full DOB — only the year, which is safe enough.
     m = DOB_RE.search(text)
     if not m:
         m = DOB_GR_RE.search(text)
@@ -521,17 +596,11 @@ def extract_clinical_fields(text: str) -> dict:
     else:
         fields["birth_year"] = ""
 
-    # ── menarche_age_raw ────────────────────────────────────────────────────
-    # Looks for: "Менархе с 14 лет", "Менархе: 12", "Menarche 13"
     menarche_match = re.search(
         r"менарх[еэ]\s*[сc]?\s*[:\-]?\s*(\d{1,2}(?:[.\-]\d{1,2})?)",
         text, re.IGNORECASE
     )
     fields["menarche_age_raw"] = menarche_match.group(1).strip() if menarche_match else ""
-
-    # ── reproductive counts ──────────────────────────────────────────────────
-    # Pattern: "Беременности - 3 Родов- 1 абортов- 2 с/п выкидышей- 0"
-    # All four often appear on the same line, so we search the whole text.
 
     preg_m = re.search(
         r"берем[её]нност[иь]\s*[-–—:]\s*(\d+|нет|-)",
@@ -557,29 +626,23 @@ def extract_clinical_fields(text: str) -> dict:
     )
     fields["miscarriages_raw"] = misc_m.group(1).strip() if misc_m else ""
 
-    # ── breastfed_raw ────────────────────────────────────────────────────────
-    # "Кормила грудью: до года", "кормление грудью - 6 мес"
     bf_m = re.search(
         r"корм(?:ила|ление)[^:\n]{0,20}(?:грудью)?\s*[:\-–—]?\s*([^\n]{1,60})",
         text, re.IGNORECASE
     )
     fields["breastfed_raw"] = bf_m.group(1).strip() if bf_m else ""
 
-    # ── breastfed_complications_raw ──────────────────────────────────────────
     compl_m = re.search(
         r"осложнени[яей][^:\n]{0,30}(?:кормлени[яей]|лактац)[^:\n]{0,20}[:\-–—]?\s*([^\n]{1,150})",
         text, re.IGNORECASE
     )
     if not compl_m:
-        # fallback: line that mentions мастит or лактостаз
         compl_m = re.search(
             r"((?:мастит|лактостаз)[^\n]{0,120})",
             text, re.IGNORECASE
         )
     fields["breastfed_complications_raw"] = compl_m.group(1).strip() if compl_m else ""
 
-    # ── complaints_raw ───────────────────────────────────────────────────────
-    # "Жалобы на ..." — take up to 400 chars of free text
     complaints = _first_line_after(
         text,
         ("Жалобы на", "Жалобы:", "Жалобы", "Жалоб"),
@@ -587,8 +650,6 @@ def extract_clinical_fields(text: str) -> dict:
     )
     fields["complaints_raw"] = complaints[:400]
 
-    # ── diagnosis_raw ────────────────────────────────────────────────────────
-    # Look for the final diagnosis block; several header variants exist
     diagnosis = _first_line_after(
         text,
         (
@@ -603,23 +664,15 @@ def extract_clinical_fields(text: str) -> dict:
     )
     fields["diagnosis_raw"] = diagnosis[:300]
 
-    # ── icd10_code ───────────────────────────────────────────────────────────
-    # ICD-10 codes look like N60.1, C50, D24 — letter + 2 digits + optional .digit
-    icd_m = re.search(
-        r"\b([A-Z]\d{2}(?:\.\d{1,2})?)\b",
-        text
-    )
+    icd_m = re.search(r"\b([A-Z]\d{2}(?:\.\d{1,2})?)\b", text)
     fields["icd10_code"] = icd_m.group(1).strip() if icd_m else ""
 
-    # ── birads_raw ───────────────────────────────────────────────────────────
-    # Very inconsistently written: "BIRADS 2", "BI-RADS 3", "Bi-Rads1|2", "бирадс 4"
     birads_m = re.search(
         r"(?:bi[-\s]?rads|бирадс|birads)\s*[:\-]?\s*([\d|/\\\s]{1,10})",
         text, re.IGNORECASE
     )
     fields["birads_raw"] = birads_m.group(1).strip() if birads_m else ""
 
-    # ── nodular_formation_raw ────────────────────────────────────────────────
     nodular = _first_line_after(
         text,
         ("Узловые образования", "Объемные образования", "Узловое образование"),
@@ -627,9 +680,6 @@ def extract_clinical_fields(text: str) -> dict:
     )
     fields["nodular_formation_raw"] = nodular[:200]
 
-    # ── heredity_oncology_raw ────────────────────────────────────────────────
-    # Take the full heredity line — doctor writes free text like
-    # "тетя рмж до 50 лет", "мать рак молочной железы", "не отягощен"
     heredity = _first_line_after(
         text,
         ("Наследственность", "Наследственный анамнез", "Heredity"),
@@ -637,15 +687,12 @@ def extract_clinical_fields(text: str) -> dict:
     )
     fields["heredity_oncology_raw"] = heredity[:300]
 
-    # ── past_diabetes_raw ────────────────────────────────────────────────────
-    # "сахарный диабет - отрицает", "сахарный диабет 2 типа"
     diab_m = re.search(
         r"сахарн[ыой]{1,2}\s+диабет[а-я]{0,4}[^\n]{0,80}",
         text, re.IGNORECASE
     )
     fields["past_diabetes_raw"] = diab_m.group(0).strip() if diab_m else ""
 
-    # ── past_thyroid_raw ─────────────────────────────────────────────────────
     thyroid = _first_line_after(
         text,
         ("Заболевания щитовидной железы", "щитовидная железа", "щитовидной"),
@@ -653,16 +700,12 @@ def extract_clinical_fields(text: str) -> dict:
     )
     fields["past_thyroid_raw"] = thyroid[:150]
 
-    # ── ca153_raw ────────────────────────────────────────────────────────────
-    # "СА-15.3- 12.5 ед/мл", "CA 15-3: 18,3", "СА-15.3- - ед/мл" (empty = dash)
     ca_m = re.search(
         r"[сc][аa][-\s]?15[.\-]?3\s*[-–—:]\s*([\d.,\-–— ]{1,20})\s*(?:ед|u|ме)?",
         text, re.IGNORECASE
     )
     fields["ca153_raw"] = ca_m.group(1).strip() if ca_m else ""
 
-    # ── uzi_result_raw ───────────────────────────────────────────────────────
-    # Grab the УЗИ молочных желез result line(s) — raw, up to 300 chars
     uzi = _first_line_after(
         text,
         ("УЗИ молочных желез от", "УЗИ молочных желез", "Ультразвуковое исследование"),
@@ -674,7 +717,7 @@ def extract_clinical_fields(text: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# Main (original logic + clinical fields added)
+# Main
 # ─────────────────────────────────────────────
 def main() -> None:
     if not IN_CSV.exists():
@@ -687,6 +730,7 @@ def main() -> None:
     stats_quality = Counter()
     stats_rule = Counter()
     stats_errors = Counter()
+    stats_trimmed = Counter()
 
     written = 0
     skipped_no_patient = 0
@@ -726,13 +770,15 @@ def main() -> None:
 
             try:
                 parsed_docx += 1
-                text = docx_text(path)
+                raw_text = docx_text(path)
+                text = trim_to_main_patient_block(raw_text, path)
+                if text != raw_text:
+                    stats_trimmed["trimmed_foreign_tail"] += 1
             except Exception:
                 stats_errors["docx_read_error"] += 1
                 skipped_no_patient += 1
                 continue
 
-            # patient
             fio_raw, dob_raw, fio_source = extract_fio_and_dob(text, path)
             if not fio_raw or not dob_raw:
                 skipped_no_patient += 1
@@ -751,7 +797,6 @@ def main() -> None:
                 skipped_bad_patient += 1
                 continue
 
-            # dates
             visit_date = ""
             date_source = before_source
             date_rule_used = "none"
@@ -787,7 +832,6 @@ def main() -> None:
             except Exception:
                 stats_errors["date_extract_error"] += 1
 
-            # infer unknown
             vt_inferred = original_vt
             vt_final = original_vt
             if original_vt == "unknown":
@@ -796,8 +840,6 @@ def main() -> None:
                 )
                 vt_final = vt_inferred
 
-            # NEW: clinical fields — wrapped in try/except so one bad file
-            # never kills the whole run. On error: all fields become "".
             try:
                 clinical = extract_clinical_fields(text)
             except Exception:
@@ -814,7 +856,6 @@ def main() -> None:
                     "ca153_raw": "", "uzi_result_raw": "",
                 }
 
-            # build SAFE output row (no path/filename)
             out_row = {}
             for k, v in row.items():
                 if k.lower() in {"path", "filename"}:
@@ -832,7 +873,6 @@ def main() -> None:
             out_row["visit_type_inferred"] = vt_inferred
             out_row["visit_type_final"] = vt_final
 
-            # append clinical fields at the end
             out_row.update(clinical)
 
             rows_out.append(out_row)
@@ -879,6 +919,11 @@ def main() -> None:
     print("\nRule used (overall):")
     for k, v in stats_rule.most_common():
         print(f"  {k}: {v}")
+
+    if stats_trimmed:
+        print("\nTrimmed foreign tails:")
+        for k, v in stats_trimmed.most_common():
+            print(f"  {k}: {v}")
 
     if stats_errors:
         print("\nErrors (safe counts):")
