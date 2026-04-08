@@ -189,6 +189,7 @@ DATE_DOT_YYYY_RE = re.compile(r"\b(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})\b")
 DATE_SLASH_YYYY_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
 DATE_DOT_YY_RE = re.compile(r"\b(\d{1,2})[.\-](\d{1,2})[.\-](\d{2})\b")
 DATE_SLASH_YY_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{2})\b")
+DATE_KZ_RE = re.compile(r"\b(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})ж", re.IGNORECASE)
 
 RU_MONTHS = {
     "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
@@ -235,6 +236,9 @@ CONSULT_PRIORITY_PATTERNS = [
 ]
 
 ULTRASOUND_PRIORITY_PATTERNS = [
+    ("protocol_header_date", re.compile(
+        r"протокол\s+исследования[^\n]{0,80}\n\s*"
+        r"(\d{1,2}[.\-]\d{1,2}[.\-]\d{4})(?:ж[.\s(]|$|\s)", re.IGNORECASE), 1),
     ("uzi_from", re.compile(
         r"(узи[^0-9]{0,160}от[^0-9]{0,25})"
         r"(\d{1,2}[.\-/]\d{1,2}[.\-/](\d{2}|\d{4}))", re.IGNORECASE), 2),
@@ -434,6 +438,17 @@ def collect_date_candidates(text: str) -> list[dict]:
             continue
         out.append({"pos": m.start(), "dt": dt, "raw_kind": "ru_month"})
 
+    for m in DATE_KZ_RE.finditer(t):
+        day = int(m.group(1))
+        month = int(m.group(2))
+        year = int(m.group(3))
+        dt = safe_datetime(day, month, year)
+        if dt is None:
+            continue
+        if has_any_hint_near(t, m.start(), BIRTH_HINTS, window=55):
+            continue
+        out.append({"pos": m.start(), "dt": dt, "raw_kind": "kz_suffix"})
+        
     out.sort(key=lambda x: x["pos"])
     return out
 
