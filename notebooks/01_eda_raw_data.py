@@ -76,7 +76,7 @@ def _(mo):
     - `births_raw = 2016` is an invalid value, likely caused by incorrect extraction
       (e.g., a year mistakenly parsed as a count).
 
-    - `menarche_age_raw = 1` is due to a parsing error (e.g., "1 8" interpreted as 1).
+    - `menarche_age_raw = 1` is an error
 
     - In 80 rows, `pregnancies_raw` does not match the sum of `births_raw`,
       `abortions_raw`, and `miscarriages_raw` (excluding rows with missing values).
@@ -255,6 +255,18 @@ def _(df):
 @app.cell
 def _(df):
     df[df['visit_date'] == '2020-03-01']['date_quality'].value_counts()
+    return
+
+
+@app.cell
+def _(df):
+    df['date_quality'].value_counts()
+    return
+
+
+@app.cell
+def _(df):
+    df['date_source'].value_counts()
     return
 
 
