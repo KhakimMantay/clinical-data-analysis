@@ -6,10 +6,12 @@ import hashlib
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
-
 from docx import Document
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(PROJECT_ROOT / '.env')
+
 IN_CSV = PROJECT_ROOT / "file_index.csv"
 OUT_CSV = PROJECT_ROOT / "file_index_with_dates.csv"
 
