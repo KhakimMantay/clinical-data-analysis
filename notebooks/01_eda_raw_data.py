@@ -7,7 +7,6 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import pandas as pd
-    import numpy as np
     import marimo as mo
 
     return mo, pd
@@ -32,241 +31,165 @@ def _(df):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(df):
-    df.describe()
-    return
-
-
-@app.cell
-def _(df):
-    df.isnull().sum()
-    return
-
-
-@app.cell
-def _(df):
-    missing_pct = (df.isnull().sum() / len(df) * 100).round(1)
-    missing_pct
-    return
-
-
-@app.cell
-def _(df):
-    df.corr(numeric_only=True) #Most of the data is categorial, hence correlations are useless
-    return
+    n_rows, n_cols = df.shape
+    n_patients = df['patient_id'].nunique(dropna=True) if 'patient_id' in df.columns else 0
+    missing_any = df.isna().any(axis=1).sum()
+    missing_cells = int(df.isna().sum().sum())
+    return missing_any, missing_cells, n_cols, n_patients, n_rows
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
-    ### Data anomalies analysis
+def _(missing_any, missing_cells, mo, n_cols, n_patients, n_rows):
+    mo.md(f"""
+    ## Raw data overview
 
-    Several extreme values and inconsistencies were manually investigated:
+    This notebook evaluates the raw file index and prepares cleaned analytical datasets for downstream visit level analysis.
 
-    - `visit_type_final = 'unknown'`: 24 rows were identified. Most of the clinical features in these entries are missing.
+    ### Dataset snapshot
 
-    - All values in `visit_type_final` are identical to those in `visit_type_inferred`.
+    - Total rows: **{n_rows:,}**
+    - Total columns: **{n_cols:,}**
+    - Unique patients: **{n_patients:,}**
+    - Rows with at least one missing value: **{missing_any:,} ({round(missing_any / n_rows * 100, 1) if n_rows else 0}%)**
+    - Total missing cells: **{missing_cells:,}**
 
-    - Most of the rows with original `visit_type = 'unknown'` were reassigned in `visit_type_inferred` (~7.3% of the dataset).
-
-    - `pregnancies_raw = 20` was verified against source data and found to be valid
-      (sum of births, abortions, and miscarriages).
-
-    - `births_raw = 2016` is an invalid value, likely caused by incorrect extraction
-      (e.g., a year mistakenly parsed as a count).
-
-    - `menarche_age_raw = 1` is an error
-
-    - In 80 rows, `pregnancies_raw` does not match the sum of `births_raw`,
-      `abortions_raw`, and `miscarriages_raw` (excluding rows with missing values).
-
-    - Rows with original `visit_type = 'unknown'` show a high percentage of missing
-      values across clinical features.
-
-    - Multiple records can correspond to a single real-world visit, as different document types
-      (e.g., ultrasound, consultation) may be created for the same patient on the same date.
-
-    - Some visit dates were inferred as the first day of the month (`YYYY-MM-01`) due to missing
-      day information (`date_quality = 'month_only'`), which introduces artificial spikes in daily counts.
-
-    - High-frequency dates (e.g., 30+ records per day) were found to consist of both valid extracted
-      dates (`exact_anchor`) and imputed dates (`month_only`), indicating mixed data quality.
-
-    ---
-
-    ### Conclusions and required data cleaning steps
-
-    The exploratory data analysis revealed several data quality issues that must be addressed before further analysis:
-
-    - Rows where `visit_type_final = 'unknown'` contain insufficient information and should be removed, as they provide little analytical value and contain a high proportion of missing features.
-
-    - Some clinical variables contain clear extraction errors (e.g., unrealistic values such as `births_raw = 2016` or `menarche_age_raw = 1`). These values must be cleaned, corrected, or excluded to prevent distortion of statistical analysis.
-
-    - Internal inconsistencies were identified (e.g., `pregnancies_raw` not matching the sum of related variables). These rows should be validated or excluded depending on the analysis requirements.
-
-    - Visit dates with `date_quality = 'month_only'` are artificially imputed and lead to biased temporal distributions (e.g., spikes on the first day of each month). These rows should be excluded or handled separately in time-based analyses.
-
-    - The dataset is structured at the file level rather than the visit level, meaning that multiple rows may correspond to a single real-world visit. Therefore, aggregation by `(patient_id, visit_date)` is required to correctly represent visits.
-
-    - The presence of fallback-based date extraction (e.g., `fallback_single`, `fallback_scored`) indicates that the date extraction logic may be incomplete, particularly for certain document types (e.g., ultrasound). Further refinement of the extraction pipeline is recommended.
-
-    - High-frequency dates must be interpreted with caution, as they may reflect a mixture of true visit dates and imputed or low-confidence values.
-
-    Overall, additional preprocessing is required to ensure data reliability before performing statistical analysis or building models.
+    The workflow first audits extraction quality, then constructs cleaned document level and visit level datasets for downstream analysis.
     """)
     return
 
 
 @app.cell
 def _(df):
-    print((df['visit_type_final'].value_counts()['unknown'])) #number of visits, which visit type we dont know
-    unknown_visit_type = df[df['visit_type_final'] == 'unknown']
-    unknown_visit_type
+    missing_pct = (df.isnull().sum() / len(df) * 100).round(1)
+    missing_pct.sort_values(ascending=False)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Audit of extraction
+    This section evaluates the reliability of extracted visit dates and document types before downstream analysis.
+    """)
     return
 
 
 @app.cell
 def _(df, pd):
-    df_compare_visit_types = pd.concat([df["visit_type_final"].value_counts(), df["visit_type"].value_counts(), df["visit_type_inferred"].value_counts()],axis=1)
+    df_flagged = df.copy()
 
-    df_compare_visit_types.columns = ["final", "original", "inferred"]
+    df_flagged['visit_date_dt'] = pd.to_datetime(df['visit_date'], errors='coerce')
+    df_flagged['folder_year_match'] = df_flagged['visit_date_dt'].dt.year == df_flagged['year']
+    df_flagged['is_docx_date'] = df_flagged['date_source'] == 'docx'
+    df_flagged['is_exact_date'] = df_flagged['date_quality'] == 'exact_anchor'
+    df_flagged['is_low_confidence_date'] = df_flagged['date_quality'].isin(['fallback_single', 'fallback_scored', 'month_only'])
+    df_flagged['is_unknown_type_visit'] = df_flagged['visit_type_final'] == 'unknown'
+    df_flagged['is_follow_up'] = df_flagged['visit_type_final'] == 'follow_up'
+    df_flagged['is_month_only'] = (df_flagged['date_rule_used'] == 'none') | (df_flagged['date_quality'] == 'month_only')
 
-    df_compare_visit_types #comparing numbers of categories of visit_types features
+    df_flagged.head(20)
+    return (df_flagged,)
+
+
+@app.cell
+def _(df_flagged, pd):
+    pd.crosstab(df_flagged['visit_type_final'], df_flagged['date_quality'])
     return
 
 
 @app.cell
-def _(df):
-    mask_visit = df['visit_type'] == 'unknown'
-
-    unknown_visit_missing_pct = (df[mask_visit].isna().mean() * 100).round(1) #percent of missing data(by columns) in data where original visit type was 'unknown'
-    unknown_visit_missing_pct
+def _(df_flagged, pd):
+    pd.crosstab(df_flagged['year'], df_flagged['date_quality'])
     return
 
 
 @app.cell
-def _(df):
-    compare_final_inferred = (df['visit_type_final'] == df['visit_type_inferred']).sum()
-    compare_inferred_original = (df['visit_type_inferred'] == df['visit_type']).sum()
-
-    compare_final_inferred
-    return (compare_inferred_original,)
-
-
-@app.cell
-def _(compare_inferred_original, df):
-    ((len(df) - compare_inferred_original) / len(df) * 100).round(1)
+def _(df_flagged, pd):
+    pd.crosstab(df_flagged['date_source'], df_flagged['date_quality'])
     return
 
 
 @app.cell
-def _(df):
-    mask_suspicious = (df['visit_type'] == 'unknown') & (df['visit_type_final'] != 'unknown')
+def _(df_flagged, pd):
+    pd.crosstab(df_flagged['visit_type'], df_flagged['visit_type_final'])
+    return
 
-    key_cols = ['visit_date', 'birth_year', 'complaints_raw', 
-                'diagnosis_raw', 'birads_raw']
 
-    (df[mask_suspicious][key_cols].isnull().mean() * 100).round(1)
+@app.cell(hide_code=True)
+def _(df_flagged):
+    n = len(df_flagged)
+
+    folder_year_mismatches = (~df_flagged['folder_year_match']).sum()
+    raw_unknown = (df_flagged['visit_type'] == 'unknown').sum()
+    final_unknown = (df_flagged['visit_type_final'] == 'unknown').sum()
+    docx_dates = df_flagged['is_docx_date'].sum()
+    exact_dates = df_flagged['is_exact_date'].sum()
+    low_conf_dates = df_flagged['is_low_confidence_date'].sum()
+    month_only = (df_flagged['date_quality'] == 'month_only').sum()
+    return (
+        docx_dates,
+        exact_dates,
+        final_unknown,
+        folder_year_mismatches,
+        low_conf_dates,
+        month_only,
+        n,
+        raw_unknown,
+    )
+
+
+@app.cell(hide_code=True)
+def _(
+    docx_dates,
+    exact_dates,
+    final_unknown,
+    folder_year_mismatches,
+    low_conf_dates,
+    mo,
+    month_only,
+    n,
+    raw_unknown,
+):
+    mo.md(f"""
+    ## Extraction audit summary
+
+    The extraction audit was conducted on **{n:,} document level records** before any patient level processing.
+
+    ### Key findings
+
+    - Total records: **{n:,}**
+    - Folder year mismatches: **{folder_year_mismatches:,} ({round(folder_year_mismatches / n * 100, 1) if n else 0}%)**
+    - Raw unknown visit types in `visit_type`: **{raw_unknown:,} ({round(raw_unknown / n * 100, 1) if n else 0}%)**
+    - Final unknown visit types in `visit_type_final`: **{final_unknown:,} ({round(final_unknown / n * 100, 1) if n else 0}%)**
+    - Dates extracted from `docx`: **{docx_dates:,} ({round(docx_dates / n * 100, 1) if n else 0}%)**
+    - High confidence dates with `exact_anchor`: **{exact_dates:,} ({round(exact_dates / n * 100, 1) if n else 0}%)**
+    - Low confidence dates with `fallback_single`, `fallback_scored`, or `month_only`: **{low_conf_dates:,} ({round(low_conf_dates / n * 100, 1) if n else 0}%)**
+    - Month only dates: **{month_only:,} ({round(month_only / n * 100, 1) if n else 0}%)**
+
+    ### Interpretation
+
+    Overall, extraction quality appears reasonably strong. Most records are based on `docx` sources, and a large majority of dates are classified as `exact_anchor`, which supports downstream temporal analysis.
+
+    Document typing also improves substantially after post processing. The number of `unknown` records decreases from **{raw_unknown:,}** in the raw `visit_type` field to **{final_unknown:,}** in `visit_type_final`, which supports using `visit_type_final` as the main document type variable in later steps.
+    """)
     return
 
 
 @app.cell
-def _(df):
-    minimal_birth_num = df.loc[df['births_raw'].idxmax()] #probably mistake in the document, we dont know births count
-    minimal_birth_num
+def _(df_flagged):
+    sfall_consult = df_flagged[(df_flagged['visit_type_final'] == 'consult') & (df_flagged['date_quality'] == 'fallback_single')].copy()
+    sfall_consult['folder_year_match'] # only 6 of 253 MISMATCH
+    sfall_consult['visit_date'].value_counts() # most of the dates are unique
+    sfall_consult['is_docx_date'].value_counts() #all date source is from docx
+    sfall_consult
     return
 
 
 @app.cell
-def _(df):
-    maximal_pregnancy_number = df.loc[df['pregnancies_raw'].idxmax()] #births + abortions + miscarriages = 20, fine data
-    maximal_pregnancy_number
-    return
-
-
-@app.cell
-def _(df):
-    df.loc[df['menarche_age_raw'].idxmin()] #'Менархе с 1 8 лет,' just a misstyping, replace with a 18
-    return
-
-
-@app.cell
-def _(df, pd):
-    mask = df[['pregnancies_raw','abortions_raw', 'miscarriages_raw', 'births_raw']].notna().all(axis = 1)
-
-    misscariages_numeric = pd.to_numeric(df['miscarriages_raw'], errors="coerce")
-
-    wrong_pregnancy_number_rows = df[(mask) & (df['pregnancies_raw'] != df['abortions_raw'] + misscariages_numeric + df['births_raw'])]
-    wrong_pregnancy_number_rows
-    return
-
-
-@app.cell
-def _(df):
-    df[['date_rule_used', 'date_quality']].value_counts()
-    return
-
-
-@app.cell
-def _(df):
-    df[df['date_rule_used'] == 'fallback_single'].head(10)
-    return
-
-
-@app.cell
-def _(df):
-    ultrasound_date_rule = (df[df['visit_type_inferred'] == 'ultrasound']['date_rule_used'] == 'fallback_single')
-    ultrasound_date_rule.value_counts()
-    return
-
-
-@app.cell
-def _(df):
-    df[(df['visit_type_final'] == 'ultrasound') & (df['date_rule_used'] != 'fallback_single')]
-    return
-
-
-@app.cell
-def _(df):
-    df[df['date_rule_used'] == 'none'][['visit_date', 'date_quality']]
-    return
-
-
-@app.cell
-def _(df):
-    df['visit_date'].value_counts() # too many visits on some dates, should check
-    return
-
-
-@app.cell
-def _(df):
-    df['visit_date'].value_counts().head()
-    return
-
-
-@app.cell
-def _(df):
-    visits = df.drop_duplicates(subset=['patient_id', 'visit_date'])
-    visits['visit_date'].value_counts().head()
-    return
-
-
-@app.cell
-def _(df):
-    df[df['visit_date'] == '2020-03-01']['date_quality'].value_counts()
-    return
-
-
-@app.cell
-def _(df):
-    df['date_quality'].value_counts()
-    return
-
-
-@app.cell
-def _(df):
-    df['date_source'].value_counts()
+def _(df_flagged):
+    df_flagged.to_csv('raw.csv', index = False)
     return
 
 
