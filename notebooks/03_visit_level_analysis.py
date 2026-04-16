@@ -15,92 +15,115 @@ def _():
 @app.cell
 def _(pd):
     df = pd.read_csv('visits.csv', parse_dates = ['visit_day'])
-
-    df.head()
+    df
     return (df,)
 
 
 @app.cell
 def _(df):
-    df['analysis_period'] = df['visit_day'].dt.year.map(lambda y: '2019_2020' if y < 2021 else '2021_plus')
+    ANALYSIS_PERIOD_START = 2021
+    df['dataset_flag'] = df['visit_day'].dt.year.map(lambda y: '2021_plus' if y >= ANALYSIS_PERIOD_START else '2019-2020')
+
+    df[df['visit_day'].dt.year >= ANALYSIS_PERIOD_START]['dataset_flag'].value_counts()
+    return (ANALYSIS_PERIOD_START,)
+
+
+@app.cell
+def _(ANALYSIS_PERIOD_START, df, pd):
+    def summarize_visits(data, label):
+        out = {
+            'dataset': label,
+            'n_visits': len(data),
+            'n_unique_patients': data['patient_id'].nunique(),
+            'visits_per_patient': round(len(data) / data['patient_id'].nunique(), 2),
+            'mean_age_at_visit': data['age_at_visit_approx'].mean().round(1),
+            'median_age_at_visit': data['age_at_visit_approx'].median(),
+            'ultrasound_share_pct': (data['has_ultrasound'].mean() * 100).round(1),
+            'mean_global_visit_number': data['visit_number'].mean().round(2),
+            'median_global_visit_number': data['visit_number'].median(),
+            'prev_visit_interval_available_pct': (data['days_since_prev_visit'].notna().mean() * 100).round(1),
+            'mean_days_since_prev_visit': data['days_since_prev_visit'].dropna().mean().round(1),
+            'median_days_since_prev_visit': data['days_since_prev_visit'].dropna().median(),
+            'mean_n_docs_in_visit': data['n_docs_in_visit'].mean().round(2),
+            'median_n_docs_in_visit': data['n_docs_in_visit'].median(),
+            'primary_visit_type_pct' : (data['visit_type_grouped'] == 'primary').mean().round(2),
+            'ultrasound_visit_type_pct' : (data['visit_type_grouped'] == 'ultrasound').mean().round(2)
+        }
+
+        return out
+
+    all_years_df = df.copy()
+    analysis_df = df[df['dataset_flag'] == '2021_plus'].copy()
+
+    period_comparison = pd.DataFrame([
+        summarize_visits(all_years_df, 'all_years'), 
+        summarize_visits(analysis_df, f'{ANALYSIS_PERIOD_START}_plus')
+    ])
+
+    period_comparison
+    return analysis_df, summarize_visits
+
+
+@app.cell
+def _(df, pd):
+    visit_type_comparison = (pd.crosstab(df['dataset_flag'], df['visit_type_grouped'], normalize='index') * 100).round(1)
+    visit_type_comparison
     return
 
 
 @app.cell
 def _(df):
-    period_summary = (
-        df.groupby('analysis_period').agg(
-            n_visits = ('patient_id', 'size'),
-            patients_unique = ('patient_id', 'nunique'),
-            ultrasound_share = ('has_ultrasound', 'mean'),
-            median_days_since_prev_visit = ('days_since_prev_visit', 'median'),
-            mean_days_since_prev_visit = ('days_since_prev_visit', 'mean'),
-            median_n_docs_in_visit = ('n_docs_in_visit', 'median'),
-            mean_n_docs_in_visit = ('n_docs_in_visit', 'mean')
-        ).reset_index()
-    )
+    mask = df['dataset_flag'].eq('2019-2020')
+    df['has_history_before_2021'] = mask.groupby(df['patient_id']).transform('any')
 
-    period_summary
+    df
     return
 
 
 @app.cell
 def _(df):
-    df.info()
+    dataset_mask = df['dataset_flag'] == '2021_plus'
+
+    new_patients_visits_df = df[dataset_mask & ~df['has_history_before_2021']]
+    old_patients_visits_df = df[dataset_mask & df['has_history_before_2021']]
+
+    new_patients_visits_df
+    return new_patients_visits_df, old_patients_visits_df
+
+
+@app.cell
+def _(old_patients_visits_df):
+    old_patients_visits_df
     return
 
 
 @app.cell
-def _(df):
-    len(df)
+def _(new_patients_visits_df, old_patients_visits_df, pd, summarize_visits):
+    patient_comparison = pd.DataFrame([
+        summarize_visits(new_patients_visits_df, 'new_2021_plus_patients'), 
+        summarize_visits(old_patients_visits_df, 'old_2021_plus_patients')
+    ])
+
+    patient_comparison
     return
 
 
 @app.cell
-def _(df):
-    df['patient_id'].nunique()
+def _(analysis_df, new_patients_visits_df, pd, summarize_visits):
+    patient_groups_comparison = pd.DataFrame([
+        summarize_visits(new_patients_visits_df, 'new_2021_plus_patients'), 
+        summarize_visits(analysis_df, 'all_2021_plus_patients')
+    ])
+
+    patient_groups_comparison
     return
 
 
 @app.cell
-def _(df):
-    (df['visit_number'].value_counts() / len(df) * 100).round(2)
-    return
+def _(analysis_df, pd, summarize_visits):
+    target_group_summary = pd.Series(summarize_visits(analysis_df, 'all_2021_plus_patients'))
 
-
-@app.cell
-def _(df):
-    (df['has_ultrasound'].value_counts() / len(df) * 100).round(2)
-    return
-
-
-@app.cell
-def _(df):
-    (df['visit_type'].value_counts() / len(df) * 100).round(2)
-    return
-
-
-@app.cell
-def _(df):
-    (df['visit_type_grouped'].value_counts() / len(df) * 100).round(2)
-    return
-
-
-@app.cell
-def _(df):
-    df['days_since_prev_visit'].dropna().describe()
-    return
-
-
-@app.cell
-def _(df):
-    df[df['patient_id'] == df.loc[df['days_since_prev_visit'].idxmax()]['patient_id']] #fine data
-    return
-
-
-@app.cell
-def _(df):
-    df['n_docs_in_visit'].describe()
+    target_group_summary
     return
 
 
